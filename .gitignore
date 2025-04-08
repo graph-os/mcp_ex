@@ -1,0 +1,24 @@
+# Elixir build artifacts
+/_build/
+/deps/
+/priv/static/assets.*
+/priv/static/*.*
+erl_crash.dump
+*.ez
+
+# Logs
+*.log
+
+# OS generated files
+.DS_Store
+ehthumbs.db
+Thumbs.db
+
+# Node dependencies
+/node_modules/
+/assets/js/node_modules/
+/typescript-client-test/node_modules/
+
+# User specified exclusions
+/typescript-client-test/docs/
+/typescript-client-test/typescript-sdk/

@@ -1,0 +1,26 @@
+{
+	"compilerOptions": {
+		"target": "ESNext", // Target latest ECMAScript features
+		"module": "NodeNext",
+		"moduleResolution": "NodeNext",
+		"outDir": "./dist", // Optional: specify output directory
+		"rootDir": "./", // Source directory
+		"declaration": true, // Generate .d.ts files
+		"sourceMap": true, // Generate .js.map files
+		"strict": true,
+		"esModuleInterop": true,
+		"skipLibCheck": true,
+		"forceConsistentCasingInFileNames": true,
+		"allowImportingTsExtensions": true, // Added to allow importing .ts files directly
+		"noEmit": true, // Required when using allowImportingTsExtensions
+		"baseUrl": "."
+	},
+	"include": [
+		"*.ts", // Include root .ts files (like test_connection.ts)
+		"typescript-sdk/src/**/*.ts" // Include all .ts files within sdk-src recursively
+	],
+	"exclude": [
+		"node_modules",
+		"typescript-sdk/dist"
+	]
+}
