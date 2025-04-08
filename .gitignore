@@ -22,3 +22,8 @@ Thumbs.db
 # User specified exclusions
 /typescript-client-test/docs/
 /typescript-client-test/typescript-sdk/
+
+.cursor
+.elixir_ls
+
+vendor/

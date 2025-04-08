@@ -1,72 +1,98 @@
 defmodule Mix.Tasks.Mcp.TestClient do
   @moduledoc """
-  Starts an MCP server, runs the TypeScript MCP client test script against it,
-  and then stops the server.
+  Starts an MCP server (either default or task-specific), runs the corresponding
+  TypeScript MCP client test script against it, and then stops the server.
+
+  Accepts a `--target` argument ('default' or 'task') to select the configuration.
 
   This task performs the following steps:
   1. Checks for `node` and `npx` executables.
-  2. Calculates necessary paths.
-  3. Starts a temporary supervisor and the MCP.Endpoint server as a child.
-  4. Waits briefly for the server to start.
-  5. Runs `npm install` in the `mcp-sdk/typescript-client-test` directory.
-  6. Runs the `test_connection.ts` script using `npx tsx` against the started server.
-  7. Streams the output and exits with the script's status code.
-  8. Ensures the server supervisor is stopped in an `after` block.
+  2. Parses arguments (`--port`, `--target`).
+  3. Calculates necessary paths based on the target.
+  4. Starts a temporary supervisor and the MCP.Endpoint server as a child with the correct port.
+  5. Waits briefly for the server to start.
+  6. Runs `npm install` in the `typescript-client-test` directory.
+  7. Runs the appropriate test script (`test_connection.ts` or `test_task_connection.ts`)
+     using `npx tsx` against the started server, setting the correct environment variable
+     (`MCP_SERVER_PORT` or `MCP_TASK_SERVER_PORT`).
+  8. Streams the output and exits with the script's status code.
+  9. Ensures the server supervisor is stopped in an `after` block.
   """
   use Mix.Task
   require Logger
 
-  @shortdoc "Starts server and runs the TypeScript MCP client test script"
+  @shortdoc "Starts server and runs a specific TypeScript MCP client test script"
 
-  @switches [port: :integer]
-  @aliases [p: :port]
+  @switches [port: :integer, target: :string]
+  @aliases [p: :port, t: :target]
 
   @impl Mix.Task
   def run(args) do
-    # Parse command-line options
+    # 1. Parse command-line options
     {opts, _parsed_args, _invalid} = OptionParser.parse(args, switches: @switches, aliases: @aliases)
-    port = Keyword.get(opts, :port, 4004)
 
-    # Ensure Mix project is loaded
+    # Determine target ('default' or 'task')
+    target = Keyword.get(opts, :target, "default") # Default to "default"
+    unless target in ["default", "task"] do
+      Mix.raise("Invalid --target value: '#{target}'. Must be 'default' or 'task'.")
+    end
+
+    # Determine port based on target, overridden by --port
+    default_port = if target == "task", do: 4001, else: 4000
+    port = Keyword.get(opts, :port, default_port)
+
+    # Determine script name and env var based on target
+    {ts_test_script, port_env_var} =
+      case target do
+        "task" -> {"test_task_connection.ts", "MCP_TASK_SERVER_PORT"}
+        _      -> {"test_connection.ts", "MCP_SERVER_PORT"} # Default case
+      end
+
+    Logger.info("Selected target: #{target}, script: #{ts_test_script}, port: #{port}, env_var: #{port_env_var}")
+
+    # 2. Ensure Mix project is loaded
     Mix.Project.get!()
 
-    # 1. Check dependencies (Node.js/npx)
+    # 3. Check dependencies (Node.js/npx)
     check_node_deps()
 
-    # 2. Calculate Paths
-    {client_test_dir, ts_script_full_path} = calculate_paths()
+    # 4. Calculate Paths based on the selected script
+    {client_test_dir, ts_script_full_path} = calculate_paths(ts_test_script)
     verify_script_exists(client_test_dir, ts_script_full_path)
 
-    # Ensure the main MCP application (including Registry) is started
+    # 5. Ensure the main MCP application (including Registry) is started
     {:ok, _} = Application.ensure_all_started(:mcp)
 
-    # 3. Start Server in a Supervisor
+    # 6. Start Server in a Supervisor
     sup_name = Module.concat(__MODULE__, "Supervisor")
-    endpoint_opts = [port: port, mode: :debug] # Use debug mode for /rpc
+    # Determine path prefix based on target
+    path_prefix = if target == "task", do: "/task", else: ""
+    # Use the determined port and path prefix for the endpoint
+    endpoint_opts = [port: port, mode: :debug, path_prefix: path_prefix]
     children = [{MCP.Endpoint, endpoint_opts}]
 
     # Start supervisor linked to current process
     {:ok, sup_pid} = Supervisor.start_link(children, strategy: :one_for_one, name: sup_name)
-    Logger.info("Started test server supervisor: #{inspect sup_pid}")
+    Logger.info("Started test server supervisor: #{inspect sup_pid} for target '#{target}' on port #{port} with prefix '#{path_prefix}'")
 
     # Give server a moment to start
-    Process.sleep(200)
+    Process.sleep(500)
 
     exit_status = 0
     try do
-      # 4. Run npm install
+      # 7. Run npm install
       run_npm_install(client_test_dir)
 
-      # 5. Run the TypeScript test script
-      exit_status = run_ts_test(client_test_dir, ts_script_full_path, port)
+      # 8. Run the correct TypeScript test script with the correct env var
+      exit_status = run_ts_test(client_test_dir, ts_script_full_path, port, port_env_var)
     after
-      # 6. Ensure server is stopped
+      # 9. Ensure server is stopped
       Logger.info("Stopping test server supervisor: #{inspect sup_pid}")
       Supervisor.stop(sup_pid, :shutdown)
       Logger.info("Test server supervisor stopped.")
     end
 
-    # 7. Exit with appropriate status code
+    # 10. Exit with appropriate status code
     if exit_status != 0 do
       System.at_exit(fn _ -> exit({:shutdown, exit_status}) end)
     end
@@ -80,14 +106,13 @@ defmodule Mix.Tasks.Mcp.TestClient do
     end
   end
 
-  defp calculate_paths do
+  defp calculate_paths(ts_test_script) do
     app_path = Mix.Project.app_path()
     lib_dir = Path.dirname(app_path)
     env_dir = Path.dirname(lib_dir)
     build_dir = Path.dirname(env_dir)
     root_dir = Path.dirname(build_dir)
     client_test_dir = Path.join(root_dir, "typescript-client-test")
-    ts_test_script = "test_connection.ts"
     ts_script_full_path = Path.join(client_test_dir, ts_test_script)
     {client_test_dir, ts_script_full_path}
   end
@@ -113,12 +138,12 @@ defmodule Mix.Tasks.Mcp.TestClient do
     end
   end
 
-  defp run_ts_test(client_test_dir, ts_script_full_path, port) do
+  defp run_ts_test(client_test_dir, ts_script_full_path, port, port_env_var) do
     # Use full path for script
     ts_script_arg = Path.relative_to(ts_script_full_path, client_test_dir)
 
     Mix.shell().info("Running TypeScript client test: #{ts_script_arg} against port #{port}...")
-    env = %{"MCP_SERVER_PORT" => Integer.to_string(port)}
+    env = %{port_env_var => Integer.to_string(port)}
     opts_run = [stderr_to_stdout: true, cd: client_test_dir, into: IO.stream(:stdio, :line), env: env]
 
     case System.cmd("npx", ["tsx", ts_script_arg], opts_run) do

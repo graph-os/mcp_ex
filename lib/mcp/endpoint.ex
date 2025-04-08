@@ -1,10 +1,12 @@
 defmodule MCP.Endpoint do
   @moduledoc """
-  A reusable MCP server endpoint.
+  A reusable MCP server endpoint Supervisor.
 
   This module provides a complete, ready-to-use MCP server endpoint that can be
-  included in other applications. It uses the MCP.DefaultServer implementation
+  included in other applications. It uses the MCP.EchoServer implementation
   by default, but can be configured to use a custom server.
+  It supports routing requests based on a `:path_prefix` option by using
+  `MCP.EndpointPlug`.
 
   ## Example
 
@@ -19,15 +21,18 @@ defmodule MCP.Endpoint do
 
   ## Options
 
-  * `:server` - The MCP server module to use (default: MCP.DefaultServer)
-  * `:port` - The port to listen on (default: 4000)
+  * `:server` - The MCP server module to use (default: MCP.EchoServer)
+  * `:port` - The port to listen on (default: 4004)
   * `:mode` - The mode to use (`:sse`, `:debug`, or `:inspect`) (default: `:sse`)
   * `:host` - The host to bind to (default: "0.0.0.0")
   * `:path_prefix` - The URL path prefix for MCP endpoints (default: "/mcp")
   """
 
   use Supervisor
+  # Removed: @behaviour Plug
   require Logger
+
+  # Removed Plug setup/implementation
 
   @doc """
   Starts the MCP server endpoint.
@@ -52,43 +57,63 @@ defmodule MCP.Endpoint do
     port = Keyword.get(opts, :port, 4004)
     mode = Keyword.get(opts, :mode, :sse)
     host = Keyword.get(opts, :host, "localhost")
-    path_prefix = Keyword.get(opts, :path_prefix, "")
+    path_prefix = Keyword.get(opts, :path_prefix, "") # Read path_prefix
 
-    # Store configuration for the router
-    Application.put_env(:mcp, :endpoint, %{
+    # Normalize prefix: ensure it starts with / and doesn't end with /
+    path_prefix = normalize_prefix(path_prefix)
+
+    # Store configuration for the router AND for the endpoint itself
+    endpoint_config = %{
       server: server,
       mode: mode,
-      path_prefix: path_prefix
-    })
+      path_prefix: path_prefix,
+      port: port,
+      host: host
+    }
+    Application.put_env(:mcp, :endpoint, endpoint_config)
 
-    Supervisor.start_link(__MODULE__, {port, host}, name: __MODULE__)
+    Supervisor.start_link(__MODULE__, endpoint_config, name: __MODULE__)
   end
 
-  @impl true
-  def init({port, host}) do
-    config = Application.get_env(:mcp, :endpoint)
-    path_prefix = config.path_prefix
+  @impl Supervisor
+  def init(endpoint_config) do
+    # Extract config needed for Bandit
+    port = endpoint_config.port
+    host = endpoint_config.host
+    path_prefix = endpoint_config.path_prefix
+    mode = endpoint_config.mode
+
+    # Options passed to the MCP.EndpointPlug instance
+    plug_opts = [path_prefix: path_prefix]
 
     # Configure Bandit options
-    opts = [
+    bandit_opts = [
       port: port,
       ip: parse_host(host),
-      # Specify the plug directly
-      plug: {MCP.Router, []}
+      # Use the new MCP.EndpointPlug with the calculated options
+      plug: {MCP.EndpointPlug, plug_opts}
     ]
 
     children = [
       # Start Bandit directly
-      {Bandit, opts}
+      {Bandit, bandit_opts}
     ]
 
-    # Use inspect(host) to handle both string and IP tuple representations
-    Logger.info("MCP Endpoint starting with Bandit on #{inspect(host)}:#{port}#{path_prefix} in #{config.mode} mode")
+    Logger.info("MCP Endpoint starting with Bandit on #{inspect(host)}:#{port} in #{mode} mode. Routing prefix: '#{path_prefix || "/"}'")
 
     Supervisor.init(children, strategy: :one_for_one)
   end
 
-  # Parse a host string into an IP tuple
+  # Removed Plug init/1 and call/2
+
+  # --- Helper Functions ---
+  defp normalize_prefix(""), do: ""
+  defp normalize_prefix(prefix) when is_binary(prefix) do
+    prefix
+    |> String.trim_trailing("/")
+    |> then(fn p -> if String.starts_with?(p, "/"), do: p, else: "/" <> p end)
+  end
+
   defp parse_host(host) do
     case host do
       "localhost" -> {127, 0, 0, 1}

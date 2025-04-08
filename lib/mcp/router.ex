@@ -14,7 +14,6 @@ defmodule MCP.Router do
 
   # Plugs
   plug Plug.Logger
-  plug :put_mode # Add plug to set the mode in conn
   plug :match
   plug Plug.Parsers,
     parsers: [:json],
@@ -22,27 +21,30 @@ defmodule MCP.Router do
     json_decoder: Jason
   plug :dispatch
 
-  # Plug function to fetch configured mode and store in conn
-  defp put_mode(conn, _opts) do
-    config = Application.get_env(:mcp, :endpoint, %{mode: :sse}) # Default to :sse if not configured
-    mode = config.mode
-    put_private(conn, :mcp_mode, mode)
+  # Helper to get mode directly from config
+  defp get_current_mode do
+    config = Application.get_env(:mcp, :endpoint, %{mode: :sse}) # Default to :sse
+    config.mode
   end
 
-  # Helper to check the current mode
-  defp current_mode(conn) do
-    conn.private[:mcp_mode] || :sse
+  # Helper to check mode directly from config
+  defp should_handle_route?(allowed_modes) do
+    get_current_mode() in allowed_modes
   end
 
-  # SSE connection endpoint (available in all modes)
+  # SSE connection endpoint (available in all modes - no mode check needed here)
   get "/sse" do
     session_id = UUID.uuid4()
     Logger.info("New SSE connection", session_id: session_id)
 
-    # Return the session ID and message endpoint in the initial SSE event
+    # Fetch path prefix from config to construct correct RPC endpoint
+    config = Application.get_env(:mcp, :endpoint, %{path_prefix: ""})
+    path_prefix = config.path_prefix # Already normalized by MCP.Endpoint
+
+    # Return the session ID and message endpoint (with prefix) in the initial SSE event
     initial_data = %{
       session_id: session_id,
-      message_endpoint: "/rpc/#{session_id}"
+      message_endpoint: "#{path_prefix}/rpc/#{session_id}"
     }
 
     # Handle the SSE connection
@@ -63,7 +65,7 @@ defmodule MCP.Router do
 
   # Root path returns mode information - useful for checking server status
   get "/" do
-    mode = current_mode(conn)
+    mode = get_current_mode()
     response = %{
       status: "ok",
       mode: mode,
@@ -80,7 +82,8 @@ defmodule MCP.Router do
 
   # JSON-RPC request endpoint (without session ID)
   post "/rpc" do
-    if should_handle_route?(conn, [:debug, :inspect]) do
+    # Check mode directly
+    if should_handle_route?([:debug, :inspect]) do
       conn = fetch_query_params(conn)
       session_id = conn.query_params["session_id"]
 
@@ -98,7 +101,8 @@ defmodule MCP.Router do
 
   # JSON-RPC request endpoint (with session ID in path)
   post "/rpc/:session_id" do
-    if should_handle_route?(conn, [:debug, :inspect]) do
+    # Check mode directly
+    if should_handle_route?([:debug, :inspect]) do
       handle_rpc_request(conn, session_id)
     else
       not_found(conn)
@@ -107,7 +111,8 @@ defmodule MCP.Router do
 
   # Debug information for a specific session
   get "/debug/:session_id" do
-    if should_handle_route?(conn, [:debug, :inspect]) do
+    # Check mode directly
+    if should_handle_route?([:debug, :inspect]) do
       # Use GenServer lookup
       case SSE.ConnectionRegistryServer.lookup(session_id) do
         {:ok, data} -> # GenServer lookup returns {:ok, data} directly
@@ -130,7 +135,8 @@ defmodule MCP.Router do
 
   # List active sessions
   get "/debug/sessions" do
-    if should_handle_route?(conn, [:debug, :inspect]) do
+    # Check mode directly
+    if should_handle_route?([:debug, :inspect]) do
       # Get sessions from GenServer using the list_sessions function
       session_map = SSE.ConnectionRegistryServer.list_sessions() # Returns %{session_id => data}
       sessions = Map.keys(session_map)
@@ -145,8 +151,10 @@ defmodule MCP.Router do
 
   # JSON API description
   get "/debug/api" do
-    if should_handle_route?(conn, [:debug, :inspect]) do
+    # Check mode directly
+    if should_handle_route?([:debug, :inspect]) do
       # Build the API endpoints based on the current mode
+      current_mode = get_current_mode()
       endpoints = [
         %{
           path: "/",
@@ -186,7 +194,7 @@ defmodule MCP.Router do
       ]
 
       # Add inspector endpoints if in inspect mode
-      endpoints = if current_mode(conn) == :inspect do
+      endpoints = if current_mode == :inspect do
         endpoints ++ [
           %{
             path: "/inspector",
@@ -207,7 +215,7 @@ defmodule MCP.Router do
       |> put_resp_content_type("application/json")
       |> send_resp(200, Jason.encode!(%{
         endpoints: endpoints,
-        mode: current_mode(conn)
+        mode: current_mode
       }))
     else
       not_found(conn)
@@ -218,7 +226,8 @@ defmodule MCP.Router do
 
   # MCP Inspector UI
   get "/inspector" do
-    if should_handle_route?(conn, [:inspect]) do
+    # Check mode directly
+    if should_handle_route?([:inspect]) do
       conn
       |> put_resp_content_type("text/html")
       |> send_resp(200, inspector_html())
@@ -229,7 +238,8 @@ defmodule MCP.Router do
 
   # Debug UI for testing tools
   get "/debug/tool/:tool_name" do
-    if should_handle_route?(conn, [:inspect]) do
+    # Check mode directly
+    if should_handle_route?([:inspect]) do
       conn
       |> put_resp_content_type("text/html")
       |> send_resp(200, debug_tool_html(tool_name))
@@ -244,10 +254,6 @@ defmodule MCP.Router do
   end
 
   # Private functions
-
-  defp should_handle_route?(conn, allowed_modes) do
-    current_mode(conn) in allowed_modes
-  end
 
   defp not_found(conn) do
     conn
